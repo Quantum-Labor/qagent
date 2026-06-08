@@ -89,3 +89,38 @@ def test_qaoa_finds_optimum_on_synergy_case() -> None:
     _, bf_score = brute_force_best(scoring, 2)
     assert res.score == pytest.approx(bf_score)
     assert set(res.subset) == {2, 3}
+
+
+# --- XY mixer (Hamming-weight preserving) -----------------------------------
+
+
+def test_xy_ring_bonds_cover_the_ring() -> None:
+    from qagent.qaoa.xy_mixer import ring_bonds
+
+    bonds = ring_bonds(6)
+    assert len(bonds) == 6
+    nodes = {x for bond in bonds for x in bond}
+    assert nodes == set(range(6))
+
+
+def test_xy_mixer_preserves_cardinality() -> None:
+    """By construction every measured subset has size k (weight is preserved),
+    regardless of depth -- so even an untrained shallow run returns a valid set."""
+    from qagent.qaoa.circuit import solve_qaoa
+
+    res = solve_qaoa(_make(6, 5), 3, p=1, steps=3, shots=128, seed=0, mixer="xy")
+    assert len(res.subset) == 3
+    assert res.mixer == "xy"
+
+
+@pytest.mark.slow
+def test_xy_mixer_finds_optimum_when_deep() -> None:
+    # The single-basis-state init needs deep p to mix (Dicke init would help).
+    w = (0.9, 0.85, 0.5, 0.5, 0.05, 0.05)
+    syn = [[0.0] * 6 for _ in range(6)]
+    syn[2][3] = syn[3][2] = 1.2
+    scoring = ToolScoring(weights=w, synergy=tuple(tuple(r) for r in syn))
+    from qagent.qaoa.circuit import solve_qaoa
+
+    res = solve_qaoa(scoring, 2, p=8, steps=300, lr=0.25, shots=512, seed=0, mixer="xy")
+    assert set(res.subset) == {2, 3}

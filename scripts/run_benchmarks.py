@@ -62,9 +62,12 @@ def main() -> None:
         k = e["k"]
         opt = float(e["optimal_score"])
 
+        gd_score = greedy_top_k(sc, k)[1]
         bf_ok = abs(brute_force_best(sc, k)[1] - opt) <= EPS
-        gd_ok = abs(greedy_top_k(sc, k)[1] - opt) <= EPS
+        gd_ok = abs(gd_score - opt) <= EPS
+        gd_ratio = gd_score / opt if opt else 1.0
         qa_ok: bool | None = None
+        qa_ratio: float | None = None
         if solve_qaoa is not None:
             res = solve_qaoa(
                 sc,
@@ -76,8 +79,19 @@ def main() -> None:
                 mixer=args.mixer,
             )
             qa_ok = abs(res.score - opt) <= EPS
+            qa_ratio = res.score / opt if opt else 1.0
 
-        rows.append({"id": e["id"], "tier": e["tier"], "bf": bf_ok, "gd": gd_ok, "qa": qa_ok})
+        rows.append(
+            {
+                "id": e["id"],
+                "tier": e["tier"],
+                "bf": bf_ok,
+                "gd": gd_ok,
+                "qa": qa_ok,
+                "gd_ratio": gd_ratio,
+                "qa_ratio": qa_ratio,
+            }
+        )
 
     elapsed = time.monotonic() - t0
 
@@ -87,8 +101,15 @@ def main() -> None:
             return "n/a"
         return f"{100.0 * sum(vals) / len(vals):.1f}% ({sum(vals)}/{len(vals)})"
 
+    def ratio(rows_: list[dict[str, Any]], key: str) -> str:
+        vals = [r[key] for r in rows_ if r.get(key) is not None]
+        if not vals:
+            return "n/a"
+        return f"{sum(vals) / len(vals):.3f}"
+
     tiers = ["small", "full"]
-    print(f"\nqagent-mini  ({len(rows)} tasks, {elapsed:.1f}s)")
+    print(f"\nqagent-mini  ({len(rows)} tasks, {elapsed:.1f}s, mixer={args.mixer}, p={args.p})")
+    print("exact-match accuracy:")
     print(f"{'group':<10} {'brute-force':<16} {'greedy':<16} {'qaoa':<16}")
     print("-" * 58)
     for t in tiers:
@@ -96,6 +117,14 @@ def main() -> None:
         if sub:
             print(f"{t:<10} {pct(sub, 'bf'):<16} {pct(sub, 'gd'):<16} {pct(sub, 'qa'):<16}")
     print(f"{'ALL':<10} {pct(rows, 'bf'):<16} {pct(rows, 'gd'):<16} {pct(rows, 'qa'):<16}")
+    print("\nmean approximation ratio (score / optimal):")
+    print(f"{'group':<10} {'greedy':<10} {'qaoa':<10}")
+    print("-" * 32)
+    for t in tiers:
+        sub = [r for r in rows if r["tier"] == t]
+        if sub:
+            print(f"{t:<10} {ratio(sub, 'gd_ratio'):<10} {ratio(sub, 'qa_ratio'):<10}")
+    print(f"{'ALL':<10} {ratio(rows, 'gd_ratio'):<10} {ratio(rows, 'qa_ratio'):<10}")
 
 
 if __name__ == "__main__":

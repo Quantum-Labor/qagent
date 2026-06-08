@@ -1,10 +1,18 @@
 """QAOA ansatz for select-k-from-N tool selection (one-hot, PennyLane).
 
-The cost Hamiltonian encodes ``-score(S) + penalty * (|S| - k)^2`` in the Pauli-Z
-basis via ``x_i = (1 - Z_i) / 2``. Minimising its expectation drives amplitude
-onto the highest-scoring size-``k`` subset. A standard transverse-field X mixer is
-used; the cardinality constraint lives entirely in the cost Hamiltonian as a soft
-penalty (see docs/qaoa-explained.md).
+The cost is diagonal in the Pauli-Z basis (single-Z and ZZ terms only, via
+``x_i = (1 - Z_i) / 2``), so its expectation is ``sum_x p(x) E(x)`` for a
+precomputed energy vector ``E`` -- which is what the optimiser minimises (much
+cheaper than a term-by-term Hamiltonian expectation, and what makes deeper p
+practical).
+
+Two mixers are supported:
+
+* ``"x"`` (default) -- transverse-field X mixer. Does not conserve cardinality, so
+  the constraint ``|S| = k`` lives in the cost Hamiltonian as a soft penalty.
+* ``"xy"`` -- ring XY mixer (see :mod:`qagent.qaoa.xy_mixer`). Preserves Hamming
+  weight, so starting from a feasible weight-``k`` state needs **no penalty**
+  (cost = -score) and every measured bitstring already has ``|S| = k``.
 """
 
 from __future__ import annotations
@@ -16,11 +24,8 @@ from typing import Any
 import numpy as np
 import pennylane as qml
 
-from qagent.qaoa.encoding import (
-    ToolScoring,
-    bitstring_to_subset,
-    score_subset,
-)
+from qagent.qaoa.encoding import ToolScoring, bitstring_to_subset, score_subset
+from qagent.qaoa.xy_mixer import apply_xy_ring_mixer, feasible_init
 
 
 def default_penalty(scoring: ToolScoring) -> float:
@@ -46,16 +51,13 @@ def default_penalty(scoring: ToolScoring) -> float:
 def cost_coefficients(
     scoring: ToolScoring, k: int, penalty: float
 ) -> tuple[list[float], dict[tuple[int, int], float]]:
-    """Return ``(h, zz)``: single-qubit ``Z_i`` coefficients and ``Z_i Z_j``
-    coefficients for the cost Hamiltonian, derived from the QUBO objective
-    ``-score(x) + penalty * (sum_i x_i - k)^2`` with ``x_i = (1 - Z_i)/2``.
-    The constant offset is dropped (it does not change the minimiser)."""
+    """Return ``(h, zz)``: single-qubit ``Z_i`` and ``Z_i Z_j`` coefficients for
+    the cost ``-score(x) + penalty * (sum_i x_i - k)^2`` with ``x_i = (1 - Z_i)/2``
+    (constant offset dropped). With ``penalty = 0`` this is just ``-score``."""
     n = scoring.n_tools
     lam = penalty
     w = scoring.weights
     syn = scoring.synergy
-
-    # Objective in x-space: linear a_i x_i + quadratic b_ij x_i x_j (i<j).
     a = [-w[i] + lam * (1 - 2 * k) for i in range(n)]
 
     def b(i: int, m: int) -> float:
@@ -94,6 +96,20 @@ def cost_hamiltonian(scoring: ToolScoring, k: int, penalty: float | None = None)
     return qml.Hamiltonian(coeffs, ops)
 
 
+def _diagonal_energies(h: list[float], zz: dict[tuple[int, int], float], n: int) -> Any:
+    """Energy E(x) of every computational basis state (Z eigenvalues), ordered to
+    match ``qml.probs(wires=0..n-1)`` (wire 0 is the most significant bit)."""
+    dim = 1 << n
+    idx = np.arange(dim)
+    z = np.empty((dim, n), dtype=np.float64)
+    for i in range(n):
+        z[:, i] = 1.0 - 2.0 * ((idx >> (n - 1 - i)) & 1)
+    energies = z @ np.asarray(h, dtype=np.float64)
+    for (i, m), c in zz.items():
+        energies += c * z[:, i] * z[:, m]
+    return energies
+
+
 @dataclass(frozen=True)
 class QAOAResult:
     """Outcome of a QAOA solve: the best size-``k`` subset measured."""
@@ -105,58 +121,81 @@ class QAOAResult:
     n_layers: int
     n_steps: int
     final_cost: float
+    mixer: str
+
+
+def _apply_cost_layer(gamma: Any, n: int, h: list[float], zz: dict[tuple[int, int], float]) -> None:
+    for i in range(n):
+        if abs(h[i]) > 1e-12:
+            qml.RZ(2.0 * gamma * h[i], wires=i)
+    for (i, m), c in zz.items():
+        if abs(c) > 1e-12:
+            qml.IsingZZ(2.0 * gamma * c, wires=[i, m])
 
 
 def _apply_ansatz(
-    gammas: Any, betas: Any, n: int, p: int, h: list[float], zz: dict[tuple[int, int], float]
+    gammas: Any,
+    betas: Any,
+    n: int,
+    k: int,
+    p: int,
+    h: list[float],
+    zz: dict[tuple[int, int], float],
+    mixer: str,
 ) -> None:
-    for w in range(n):
-        qml.Hadamard(wires=w)
+    if mixer == "xy":
+        feasible_init(k, n)
+    else:
+        for w in range(n):
+            qml.Hadamard(wires=w)
     for layer in range(p):
-        for i in range(n):
-            if abs(h[i]) > 1e-12:
-                qml.RZ(2.0 * gammas[layer] * h[i], wires=i)
-        for (i, m), c in zz.items():
-            if abs(c) > 1e-12:
-                qml.IsingZZ(2.0 * gammas[layer] * c, wires=[i, m])
-        for i in range(n):
-            qml.RX(2.0 * betas[layer], wires=i)
+        _apply_cost_layer(gammas[layer], n, h, zz)
+        if mixer == "xy":
+            apply_xy_ring_mixer(betas[layer], n)
+        else:
+            for i in range(n):
+                qml.RX(2.0 * betas[layer], wires=i)
 
 
 def solve_qaoa(
     scoring: ToolScoring,
     k: int,
     *,
-    p: int = 2,
-    steps: int = 60,
+    p: int = 4,
+    steps: int = 160,
     lr: float = 0.1,
     shots: int = 1024,
     penalty: float | None = None,
     seed: int = 0,
+    mixer: str = "x",
 ) -> QAOAResult:
     """Optimise a ``p``-layer QAOA for select-``k`` and return the best measured
     size-``k`` subset.
 
-    Parameters are trained with PyTorch/Adam against the analytic cost expectation
-    (``default.qubit`` backprop). The answer is read out by sampling and keeping
-    the highest-scoring measured subset of size ``k`` (a classical post-check over
-    the measured candidates); if sampling produces no size-``k`` candidate, the
-    most-probable size-``k`` basis state is returned analytically.
+    ``mixer="x"`` uses the X mixer with a cardinality penalty; ``mixer="xy"`` uses
+    the Hamming-weight-preserving ring XY mixer with no penalty. Parameters are
+    trained with PyTorch/Adam against the (diagonal) cost expectation, then the
+    answer is read out by sampling and keeping the highest-scoring measured size-k
+    subset.
     """
     import torch
 
+    if mixer not in ("x", "xy"):
+        raise ValueError(f"unknown mixer {mixer!r}; use 'x' or 'xy'")
+
     n = scoring.n_tools
-    if penalty is None:
-        penalty = default_penalty(scoring)
-    hamiltonian = cost_hamiltonian(scoring, k, penalty)
-    h, zz = cost_coefficients(scoring, k, penalty)
+    penalty_used = (
+        0.0 if mixer == "xy" else (default_penalty(scoring) if penalty is None else penalty)
+    )
+    h, zz = cost_coefficients(scoring, k, penalty_used)
+    energies = torch.tensor(_diagonal_energies(h, zz, n), dtype=torch.float64)
 
     dev = qml.device("default.qubit", wires=n, seed=seed)
 
     @qml.qnode(dev, interface="torch", diff_method="backprop")
-    def cost_expval(gammas: Any, betas: Any) -> Any:
-        _apply_ansatz(gammas, betas, n, p, h, zz)
-        return qml.expval(hamiltonian)
+    def probs_qnode(gammas: Any, betas: Any) -> Any:
+        _apply_ansatz(gammas, betas, n, k, p, h, zz, mixer)
+        return qml.probs(wires=list(range(n)))
 
     torch.manual_seed(seed)
     gammas = torch.full((p,), 0.1, dtype=torch.float64, requires_grad=True)
@@ -166,7 +205,7 @@ def solve_qaoa(
     final_cost = 0.0
     for _ in range(steps):
         opt.zero_grad()
-        loss = cost_expval(gammas, betas)
+        loss = torch.dot(probs_qnode(gammas, betas), energies)
         loss.backward()
         opt.step()
         final_cost = float(loss.detach())
@@ -179,7 +218,7 @@ def solve_qaoa(
     @qml.set_shots(shots=shots)
     @qml.qnode(sample_dev)
     def sample_circuit() -> Any:
-        _apply_ansatz(g, bt, n, p, h, zz)
+        _apply_ansatz(g, bt, n, k, p, h, zz, mixer)
         return qml.sample(wires=list(range(n)))
 
     samples = np.atleast_2d(np.asarray(sample_circuit()))
@@ -203,17 +242,16 @@ def solve_qaoa(
             n_layers=p,
             n_steps=steps,
             final_cost=final_cost,
+            mixer=mixer,
         )
 
-    # Fallback: no size-k state sampled -> pick the most probable size-k state.
-    prob_dev = qml.device("default.qubit", wires=n)
-
-    @qml.qnode(prob_dev)
-    def probs_circuit() -> Any:
-        _apply_ansatz(g, bt, n, p, h, zz)
+    # Fallback: no size-k state sampled -> most probable size-k basis state.
+    @qml.qnode(qml.device("default.qubit", wires=n))
+    def probs_only() -> Any:
+        _apply_ansatz(g, bt, n, k, p, h, zz, mixer)
         return qml.probs(wires=list(range(n)))
 
-    probs = np.asarray(probs_circuit())
+    probs = np.asarray(probs_only())
     best_idx = -1
     best_prob = -1.0
     for idx in range(len(probs)):
@@ -231,4 +269,5 @@ def solve_qaoa(
         n_layers=p,
         n_steps=steps,
         final_cost=final_cost,
+        mixer=mixer,
     )

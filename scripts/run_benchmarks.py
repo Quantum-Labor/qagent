@@ -38,10 +38,11 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=DATA)
     parser.add_argument("--max-entries", type=int, default=None)
     parser.add_argument("--no-qaoa", action="store_true", help="skip the QAOA backend")
-    parser.add_argument("--p", type=int, default=2, help="QAOA layers")
-    parser.add_argument("--steps", type=int, default=60, help="optimizer steps")
+    parser.add_argument("--p", type=int, default=4, help="QAOA layers")
+    parser.add_argument("--steps", type=int, default=160, help="optimizer steps")
     parser.add_argument("--shots", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--mixer", choices=["x", "xy"], default="x", help="QAOA mixer")
     args = parser.parse_args()
 
     entries = json.loads(args.dataset.read_text(encoding="utf-8"))
@@ -65,7 +66,15 @@ def main() -> None:
         gd_ok = abs(greedy_top_k(sc, k)[1] - opt) <= EPS
         qa_ok: bool | None = None
         if solve_qaoa is not None:
-            res = solve_qaoa(sc, k, p=args.p, steps=args.steps, shots=args.shots, seed=args.seed)
+            res = solve_qaoa(
+                sc,
+                k,
+                p=args.p,
+                steps=args.steps,
+                shots=args.shots,
+                seed=args.seed,
+                mixer=args.mixer,
+            )
             qa_ok = abs(res.score - opt) <= EPS
 
         rows.append({"id": e["id"], "tier": e["tier"], "bf": bf_ok, "gd": gd_ok, "qa": qa_ok})

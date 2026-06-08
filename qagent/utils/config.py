@@ -13,8 +13,9 @@ DEFAULT_K = 5
 class QAOAConfig:
     """Hyper-parameters for the QAOA solver (see qagent.qaoa.circuit.solve_qaoa)."""
 
-    n_layers: int = 2
-    steps: int = 60
+    n_layers: int = 4
+    steps: int = 160
     learning_rate: float = 0.1
     shots: int = 1024
     seed: int = 0
+    mixer: str = "x"

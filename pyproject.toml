@@ -85,6 +85,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "slow: tests that run real QAOA optimization (seconds or more)",
+    "unit: fast unit tests (includes the HF Space app smoke tests)",
 ]
 
 [tool.coverage.run]

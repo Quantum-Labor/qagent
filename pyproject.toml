@@ -47,6 +47,10 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "pre-commit>=4.0",
+    # Required by the HF Space app (space/app.py), which tests/test_space_app.py
+    # imports. Not runtime deps of the qagent package itself.
+    "gradio>=5.0",
+    "matplotlib>=3.8",
 ]
 
 [project.urls]

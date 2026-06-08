@@ -1,0 +1,7 @@
+# Verifier-only deps: the Space serves precomputed QAOA results and runs the
+# pure-Python classical solvers (brute-force, greedy) live. qagent itself is
+# installed --no-deps in the Dockerfile, so torch / pennylane / scipy are NOT
+# pulled in -- the served paths do not need them, keeping the image small.
+gradio>=5.0
+numpy<2.1
+matplotlib>=3.8

@@ -1,0 +1,61 @@
+name: Deploy to HF Space
+
+# Mirror space/ from qagent main to the Hugging Face Space Laborator/qagent via
+# the huggingface_hub HTTP API (Bearer auth). git-over-HTTPS push is rejected
+# from GitHub Actions runners, so we upload over the API instead. Requires the
+# repository secret HF_TOKEN (write scope on the Space). See docs/deploy.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "space/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hf-space
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout qagent
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub
+        run: pip install -q "huggingface_hub>=0.25"
+
+      - name: Build deploy payload
+        run: |
+          # Mirror space/ to the Space root, excluding caches.
+          mkdir -p hf-space
+          rsync -av --delete --exclude='.git/' --exclude='__pycache__/' \
+            --exclude='*.pyc' space/ hf-space/
+
+      - name: Upload to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          commit = api.upload_folder(
+              folder_path="hf-space",
+              repo_id="Laborator/qagent",
+              repo_type="space",
+              commit_message=f"deploy: sync from qagent {os.environ.get('GITHUB_SHA', '')[:7]}",
+          )
+          print(f"Deployed: {commit}")
+          PY

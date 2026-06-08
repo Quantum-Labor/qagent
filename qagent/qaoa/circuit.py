@@ -24,12 +24,23 @@ from qagent.qaoa.encoding import (
 
 
 def default_penalty(scoring: ToolScoring) -> float:
-    """A penalty large enough that any cardinality violation costs more than the
-    largest achievable score swing, so the global minimum has exactly ``|S| = k``."""
+    """Cardinality penalty just large enough to make ``|S| = k`` optimal.
+
+    Moving from a size-k subset to size k+-1 changes the penalty by ``lambda`` and
+    the score by at most the best single-tool marginal contribution. So any
+    ``lambda`` above that marginal forces the optimum to have exactly k tools; we
+    use twice the marginal for margin. This is far tighter than summing every
+    weight and synergy (the v0.1 heuristic), which swamped the score differences
+    that distinguish size-k subsets and made QAOA fail at N=16.
+    """
     n = scoring.n_tools
-    w = sum(abs(x) for x in scoring.weights)
-    j = sum(abs(scoring.synergy[i][m]) for i in range(n) for m in range(i + 1, n))
-    return 1.0 + w + 2.0 * j
+    best_marginal = 0.0
+    for i in range(n):
+        marginal = scoring.weights[i] + sum(
+            max(scoring.synergy[i][j], 0.0) for j in range(n) if j != i
+        )
+        best_marginal = max(best_marginal, marginal)
+    return 2.0 * best_marginal if best_marginal > 0.0 else 1.0
 
 
 def cost_coefficients(

@@ -35,8 +35,8 @@ footer { display: none !important; }
   padding: 30px 34px;
   flex-wrap: wrap;
 }
-.qa-hero-art { flex: 1 1 520px; min-width: 320px; }
-.qa-hero-art img { width: 100%; height: auto; display: block; border-radius: 12px; }
+.qa-hero-art { flex: 1 1 520px; min-width: 0; }
+.qa-hero-art svg, .qa-hero-art img { width: 100%; height: auto; display: block; border-radius: 12px; }
 .qa-hero-copy { flex: 1 1 320px; min-width: 280px; }
 .qa-title {
   font-family: "Inter", system-ui, sans-serif;
